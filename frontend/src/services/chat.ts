@@ -27,6 +27,17 @@ export function createConversation(
   });
 }
 
+export function removeConversation(
+  conversationId: string,
+): Promise<{ success: boolean; message: string }> {
+  return request<{ success: boolean; message: string }>(
+    `/api/conversations/${conversationId}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export function getMessages(
   conversationId: string,
 ): Promise<MessagesResponse> {

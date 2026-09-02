@@ -1,3 +1,4 @@
+
 import { Schema, model, type Types } from "mongoose";
 
 export type MessageStatus = "sent" | "delivered" | "read";
@@ -13,6 +14,8 @@ export interface Message {
   conversation: Types.ObjectId;
   sender: Types.ObjectId;
   content: string;
+  isEdited: boolean;
+  deletedAt?: Date | null;
   status: MessageStatus;
   deliveredAt?: Date | null;
   readAt?: Date | null;
@@ -40,6 +43,15 @@ const messageSchema = new Schema<Message>(
       trim: true,
       minlength: 1,
       maxlength: 5000,
+    },
+    isEdited: {
+      type: Boolean,
+      required: true,
+      default: false,
+    },
+    deletedAt: {
+      type: Date,
+      default: null,
     },
     status: {
       type: String,

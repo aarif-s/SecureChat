@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import { requireAuthentication } from "../middleware/auth.js";
 import {
+  deleteConversation,
   getConversations,
   postConversation,
 } from "../controllers/conversation.controller.js";
@@ -13,8 +14,11 @@ import {
 const router = Router();
 
 router.use(requireAuthentication);
+
 router.get("/", getConversations);
 router.post("/", postConversation);
+router.delete("/:conversationId", deleteConversation);
+
 router.get("/:conversationId/messages", getMessages);
 router.post("/:conversationId/messages", postMessage);
 

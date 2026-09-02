@@ -1,5 +1,7 @@
 export type ConversationType = "direct" | "group";
+
 export type MessageStatus = "sent" | "delivered" | "read";
+
 export type ReactionEmoji = "❤️" | "👍" | "😂" | "😮" | "😢" | "😡";
 
 export interface MessageReaction {
@@ -26,6 +28,8 @@ export interface Message {
   conversation: string;
   sender: UserSummary;
   content: string;
+  isEdited: boolean;
+  deletedAt?: string | null;
   status: MessageStatus;
   deliveredAt?: string | null;
   readAt?: string | null;
