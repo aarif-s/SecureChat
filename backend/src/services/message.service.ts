@@ -5,28 +5,24 @@ import {
   MessageModel,
   type ReactionEmoji,
 } from "../models/Message.js";
-
 import {
   ConversationNotAccessibleError,
   getAccessibleConversation,
 } from "./conversation.service.js";
-
 import type {
   EditMessageInput,
   SendMessageInput,
 } from "../schemas/message.schema.js";
+import {
+  decryptMessage,
+  encryptMessage,
+  type EncryptedMessagePayload,
+} from "./message-encryption.service.js";
 
 export class MessageNotAccessibleError extends Error {
   constructor() {
     super("Message not found.");
     this.name = "MessageNotAccessibleError";
-  }
-}
-
-export class InvalidReactionError extends Error {
-  constructor() {
-    super("Invalid reaction.");
-    this.name = "InvalidReactionError";
   }
 }
 
@@ -47,30 +43,66 @@ export interface MessageReactionUpdate {
   }>;
 }
 
-export function isAllowedReaction(
-  value: unknown,
-): value is ReactionEmoji {
-  return (
-    typeof value === "string" &&
-    (ALLOWED_REACTIONS as readonly string[]).includes(value)
-  );
+export class InvalidReactionError extends Error {
+  constructor() {
+    super("Invalid reaction.");
+    this.name = "InvalidReactionError";
+  }
+}
+
+export function isAllowedReaction(value: unknown): value is ReactionEmoji {
+  return typeof value === "string" &&
+    (ALLOWED_REACTIONS as readonly string[]).includes(value);
+}
+
+function getSenderId(sender: unknown): string {
+  if (typeof sender === "object" && sender !== null && "_id" in sender) {
+    return String(sender._id);
+  }
+  return String(sender);
+}
+
+function toMessageDto(message: Record<string, unknown>) {
+  const conversationId = String(message.conversation);
+  const senderId = getSenderId(message.sender);
+  const content = message.deletedAt
+    ? "This message was deleted."
+    : message.encryption && message.encryptedContent
+    ? decryptMessage(
+        {
+          ...message.encryption as Record<string, unknown>,
+          ciphertext: message.encryptedContent,
+        } as EncryptedMessagePayload,
+        { conversationId, senderId },
+      )
+    : typeof message.content === "string"
+      ? message.content
+      : (() => { throw new Error("Message content is unavailable."); })();
+
+  const {
+    encryptedContent: _encryptedContent,
+    encryption: _encryption,
+    ...dto
+  } = message;
+  return { ...dto, content };
 }
 
 export async function listMessages(
   conversationId: string,
   userId: string,
 ) {
-  await getAccessibleConversation(
-    conversationId,
-    userId,
-  );
+  await getAccessibleConversation(conversationId, userId);
 
-  return MessageModel.find({
+  const messages = await MessageModel.find({
     conversation: new Types.ObjectId(conversationId),
   })
     .populate("sender", "displayName email")
     .sort({ createdAt: 1 })
     .lean();
+
+  return messages.map((message) =>
+    toMessageDto(message as unknown as Record<string, unknown>),
+  );
 }
 
 export async function sendMessage(
@@ -78,65 +110,118 @@ export async function sendMessage(
   userId: string,
   input: SendMessageInput,
 ) {
-  await getAccessibleConversation(
-    conversationId,
-    userId,
-  );
+  await getAccessibleConversation(conversationId, userId);
 
+  const encrypted = encryptMessage(input.content, {
+    conversationId,
+    senderId: userId,
+  });
   const message = await MessageModel.create({
     conversation: new Types.ObjectId(conversationId),
     sender: new Types.ObjectId(userId),
-    content: input.content,
+    encryptedContent: encrypted.ciphertext,
+    encryption: {
+      algorithm: encrypted.algorithm,
+      keyVersion: encrypted.keyVersion,
+      iv: encrypted.iv,
+      authTag: encrypted.authTag,
+    },
     status: "sent",
   });
 
-  await message.populate(
-    "sender",
-    "displayName email",
-  );
+  await message.populate("sender", "displayName email");
 
-  return message;
+  return toMessageDto(message.toObject() as unknown as Record<string, unknown>);
+}
+
+export async function editMessage(
+  messageId: string,
+  conversationId: string,
+  userId: string,
+  input: EditMessageInput,
+) {
+  const conversation = await getAccessibleConversation(conversationId, userId);
+  const message = await MessageModel.findOne({
+    _id: new Types.ObjectId(messageId),
+    conversation: new Types.ObjectId(conversationId),
+  });
+
+  if (
+    !message ||
+    !message.sender.equals(new Types.ObjectId(userId)) ||
+    !conversation.participants.some((participant) => participant.equals(new Types.ObjectId(userId))) ||
+    message.deletedAt
+  ) {
+    throw new MessageNotAccessibleError();
+  }
+
+  const encrypted = encryptMessage(input.content, {
+    conversationId,
+    senderId: userId,
+  });
+  message.content = undefined;
+  message.encryptedContent = encrypted.ciphertext;
+  message.encryption = {
+    algorithm: encrypted.algorithm,
+    keyVersion: encrypted.keyVersion,
+    iv: encrypted.iv,
+    authTag: encrypted.authTag,
+  };
+  message.isEdited = true;
+
+  await message.save();
+  await message.populate("sender", "displayName email");
+
+  return toMessageDto(message.toObject() as unknown as Record<string, unknown>);
+}
+
+export async function deleteMessage(
+  messageId: string,
+  conversationId: string,
+  userId: string,
+) {
+  const conversation = await getAccessibleConversation(conversationId, userId);
+  const message = await MessageModel.findOne({
+    _id: new Types.ObjectId(messageId),
+    conversation: new Types.ObjectId(conversationId),
+  });
+
+  if (
+    !message ||
+    !message.sender.equals(new Types.ObjectId(userId)) ||
+    !conversation.participants.some((participant) => participant.equals(new Types.ObjectId(userId))) ||
+    message.deletedAt
+  ) {
+    throw new MessageNotAccessibleError();
+  }
+
+  message.deletedAt = new Date();
+  message.isEdited = false;
+
+  await message.save();
+  await message.populate("sender", "displayName email");
+
+  return toMessageDto(message.toObject() as unknown as Record<string, unknown>);
 }
 
 function serializeReactions(
   reactions: unknown,
-): Array<{
-  emoji: ReactionEmoji;
-  userIds: string[];
-}> {
+): Array<{ emoji: ReactionEmoji; userIds: string[] }> {
   const reactionList = Array.isArray(reactions)
-    ? (reactions as Array<{
+    ? reactions as Array<{
         emoji: ReactionEmoji;
         userIds: Types.ObjectId[];
-      }>)
+      }>
     : [];
 
   return reactionList
-    .filter(
-      (reaction) => reaction.userIds.length > 0,
-    )
+    .filter((reaction) => reaction.userIds.length > 0)
     .map((reaction) => ({
       emoji: reaction.emoji,
-      userIds: reaction.userIds.map((userId) =>
-        userId.toString(),
-      ),
+      userIds: reaction.userIds.map((userId) => userId.toString()),
     }));
 }
 
-/**
- * Add/change/remove a reaction.
- *
- * IMPORTANT:
- * One user can have only ONE reaction
- * on a particular message.
- *
- * Example:
- *
- * ❤️ -> 😂
- *
- * The user's ❤️ is removed and 😂 becomes
- * their only reaction.
- */
 export async function updateMessageReaction(
   messageId: string,
   conversationId: string,
@@ -149,416 +234,145 @@ export async function updateMessageReaction(
   }
 
   let conversation;
-
   try {
-    conversation = await getAccessibleConversation(
-      conversationId,
-      userId,
-    );
+    conversation = await getAccessibleConversation(conversationId, userId);
   } catch (error: unknown) {
-    if (
-      error instanceof
-      ConversationNotAccessibleError
-    ) {
+    if (error instanceof ConversationNotAccessibleError) {
       throw new MessageNotAccessibleError();
     }
-
     throw error;
   }
-
-  const messageObjectId =
-    new Types.ObjectId(messageId);
-
-  const conversationObjectId =
-    new Types.ObjectId(conversationId);
-
-  const userObjectId =
-    new Types.ObjectId(userId);
-
+  const messageObjectId = new Types.ObjectId(messageId);
+  const conversationObjectId = new Types.ObjectId(conversationId);
+  const userObjectId = new Types.ObjectId(userId);
   const message = await MessageModel.findOne({
     _id: messageObjectId,
     conversation: conversationObjectId,
-  }).select(
-    "_id conversation reactions",
-  );
+  }).select("_id conversation reactions");
 
-  if (
-    !message ||
-    !conversation.participants.some(
-      (participant) =>
-        participant.equals(userObjectId),
-    )
-  ) {
+  if (!message || !conversation.participants.some((participant) => participant.equals(userObjectId))) {
     throw new MessageNotAccessibleError();
   }
 
-  const reactions = message.reactions ?? [];
-
-  const targetReaction = reactions.find(
-    (reaction) =>
-      reaction.emoji === emoji,
-  );
-
-  const userHasTargetReaction =
-    targetReaction?.userIds.some(
-      (id) => id.equals(userObjectId),
-    ) ?? false;
-
-  /*
-   * REMOVE
-   *
-   * Clicking the reaction already selected
-   * by the current user removes it.
-   */
-  if (action === "remove") {
-    if (!userHasTargetReaction) {
-      return null;
-    }
-
-    for (const reaction of reactions) {
-      reaction.userIds =
-        reaction.userIds.filter(
-          (id) => !id.equals(userObjectId),
-        );
-    }
-
-    message.reactions =
-      reactions.filter(
-        (reaction) =>
-          reaction.userIds.length > 0,
-      );
-
-    await message.save();
-
-    return {
-      messageId:
-        message._id.toString(),
-
-      conversationId:
-        message.conversation.toString(),
-
-      emoji,
-
-      reactions:
-        serializeReactions(
-          message.reactions,
-        ),
-    };
-  }
-
-  /*
-   * ADD / CHANGE
-   *
-   * Remove the current user's reaction
-   * from every other emoji first.
-   */
+  const existingReaction = message.reactions?.find((reaction) => reaction.emoji === emoji);
+  const hasReaction = existingReaction?.userIds.some((id) => id.equals(userObjectId)) ?? false;
+  const shouldWrite = action === "add" ? !hasReaction : hasReaction;
   let changed = false;
 
-  for (const reaction of reactions) {
-    if (reaction.emoji === emoji) {
-      continue;
-    }
-
-    const hadReaction =
-      reaction.userIds.some(
-        (id) => id.equals(userObjectId),
+  if (shouldWrite) {
+    if (action === "add") {
+      const result = await MessageModel.updateOne(
+        { _id: messageObjectId, conversation: conversationObjectId },
+        { $addToSet: { "reactions.$[reaction].userIds": userObjectId } },
+        { arrayFilters: [{ "reaction.emoji": emoji }] },
       );
-
-    if (hadReaction) {
-      reaction.userIds =
-        reaction.userIds.filter(
-          (id) => !id.equals(userObjectId),
-        );
-
-      changed = true;
-    }
-  }
-
-  /*
-   * If the user doesn't already have the
-   * selected emoji, add it.
-   */
-  if (!userHasTargetReaction) {
-    if (targetReaction) {
-      targetReaction.userIds.push(
-        userObjectId,
-      );
+      changed = result.modifiedCount > 0;
     } else {
-      reactions.push({
-        emoji,
-        userIds: [userObjectId],
-      });
+      const result = await MessageModel.updateOne(
+        { _id: messageObjectId, conversation: conversationObjectId },
+        { $pull: { "reactions.$[reaction].userIds": userObjectId } },
+        { arrayFilters: [{ "reaction.emoji": emoji }] },
+      );
+      changed = result.modifiedCount > 0;
     }
-
-    changed = true;
   }
 
-  /*
-   * Remove empty reaction groups.
-   */
-  message.reactions =
-    reactions.filter(
-      (reaction) =>
-        reaction.userIds.length > 0,
+  if (action === "add" && !existingReaction) {
+    const result = await MessageModel.updateOne(
+      {
+        _id: messageObjectId,
+        conversation: conversationObjectId,
+        "reactions.emoji": { $ne: emoji },
+      },
+      { $push: { reactions: { emoji, userIds: [userObjectId] } } },
     );
+    changed = result.modifiedCount > 0;
+  }
+
+  const updatedMessage = await MessageModel.findOne({
+    _id: messageObjectId,
+    conversation: conversationObjectId,
+  }).select("_id conversation reactions");
+
+  if (!updatedMessage) {
+    throw new MessageNotAccessibleError();
+  }
 
   if (!changed) {
     return null;
   }
 
-  await message.save();
-
   return {
-    messageId:
-      message._id.toString(),
-
-    conversationId:
-      message.conversation.toString(),
-
+    messageId: updatedMessage._id.toString(),
+    conversationId: updatedMessage.conversation.toString(),
     emoji,
-
-    reactions:
-      serializeReactions(
-        message.reactions,
-      ),
+    reactions: serializeReactions(updatedMessage.reactions),
   };
-}
-
-export async function editMessage(
-  messageId: string,
-  conversationId: string,
-  userId: string,
-  input: EditMessageInput,
-) {
-  const conversation =
-    await getAccessibleConversation(
-      conversationId,
-      userId,
-    );
-
-  const message =
-    await MessageModel.findOne({
-      _id: new Types.ObjectId(messageId),
-      conversation:
-        new Types.ObjectId(conversationId),
-    });
-
-  if (!message) {
-    throw new MessageNotAccessibleError();
-  }
-
-  if (
-    !message.sender.equals(
-      new Types.ObjectId(userId),
-    )
-  ) {
-    throw new MessageNotAccessibleError();
-  }
-
-  if (
-    !conversation.participants.some(
-      (participant) =>
-        participant.equals(
-          new Types.ObjectId(userId),
-        ),
-    )
-  ) {
-    throw new MessageNotAccessibleError();
-  }
-
-  if (message.deletedAt) {
-    throw new MessageNotAccessibleError();
-  }
-
-  message.content = input.content;
-  message.isEdited = true;
-
-  await message.save();
-
-  await message.populate(
-    "sender",
-    "displayName email",
-  );
-
-  return message;
-}
-
-export async function deleteMessage(
-  messageId: string,
-  conversationId: string,
-  userId: string,
-) {
-  const conversation =
-    await getAccessibleConversation(
-      conversationId,
-      userId,
-    );
-
-  const message =
-    await MessageModel.findOne({
-      _id: new Types.ObjectId(messageId),
-      conversation:
-        new Types.ObjectId(conversationId),
-    });
-
-  if (!message) {
-    throw new MessageNotAccessibleError();
-  }
-
-  if (
-    !message.sender.equals(
-      new Types.ObjectId(userId),
-    )
-  ) {
-    throw new MessageNotAccessibleError();
-  }
-
-  if (
-    !conversation.participants.some(
-      (participant) =>
-        participant.equals(
-          new Types.ObjectId(userId),
-        ),
-    )
-  ) {
-    throw new MessageNotAccessibleError();
-  }
-
-  if (message.deletedAt) {
-    throw new MessageNotAccessibleError();
-  }
-
-  message.content =
-    "This message was deleted.";
-
-  message.deletedAt = new Date();
-  message.isEdited = false;
-
-  await message.save();
-
-  await message.populate(
-    "sender",
-    "displayName email",
-  );
-
-  return message;
 }
 
 async function updateMessageStatus(
   messageId: string,
   conversationId: string,
   userId: string,
-  field:
-    | "deliveredAt"
-    | "readAt",
+  field: "deliveredAt" | "readAt",
 ): Promise<MessageStatusUpdate | null> {
-  const messageObjectId =
-    new Types.ObjectId(messageId);
-
-  const conversationObjectId =
-    new Types.ObjectId(conversationId);
-
-  const userObjectId =
-    new Types.ObjectId(userId);
-
-  const message =
-    await MessageModel.findOne({
-      _id: messageObjectId,
-      conversation: conversationObjectId,
-    }).select(
-      "sender deliveredAt readAt",
-    );
+  const messageObjectId = new Types.ObjectId(messageId);
+  const conversationObjectId = new Types.ObjectId(conversationId);
+  const userObjectId = new Types.ObjectId(userId);
+  const message = await MessageModel.findOne({
+    _id: messageObjectId,
+    conversation: conversationObjectId,
+  }).select("sender deliveredAt readAt");
 
   if (!message) {
     throw new MessageNotAccessibleError();
   }
 
-  const conversation =
-    await getAccessibleConversation(
-      conversationId,
-      userId,
-    );
-
-  if (
-    (
-      field === "readAt" &&
-      conversation.type !== "direct"
-    ) ||
-    message.sender.equals(userObjectId) ||
-    !conversation.participants.some(
-      (participant) =>
-        participant.equals(userObjectId),
-    )
-  ) {
+  const conversation = await getAccessibleConversation(conversationId, userId);
+      if ((field === "readAt" && conversation.type !== "direct") ||
+        message.sender.equals(userObjectId) ||
+      !conversation.participants.some((participant) => participant.equals(userObjectId))) {
     throw new MessageNotAccessibleError();
   }
 
   const now = new Date();
-
-  const updated =
-    await MessageModel.findOneAndUpdate(
-      {
-        _id: messageObjectId,
-        conversation:
-          conversationObjectId,
-        [field]: null,
-        ...(field === "deliveredAt"
-          ? { readAt: null }
-          : {}),
+  const updated = await MessageModel.findOneAndUpdate(
+    {
+      _id: messageObjectId,
+      conversation: conversationObjectId,
+      [field]: null,
+      ...(field === "deliveredAt" ? { readAt: null } : {}),
+    },
+    {
+      $set: {
+        [field]: now,
+        status: field === "readAt" ? "read" : "delivered",
       },
-      {
-        $set: {
-          [field]: now,
-          status:
-            field === "readAt"
-              ? "read"
-              : "delivered",
-        },
-      },
-      {
-        returnDocument: "after",
-      },
-    ).select(
-      "_id conversation deliveredAt readAt",
-    );
+    },
+    { returnDocument: "after" },
+  ).select("_id conversation deliveredAt readAt");
 
   if (!updated) {
     return null;
   }
 
-  if (
-    field === "readAt" &&
-    !updated.deliveredAt
-  ) {
+  if (field === "readAt" && !updated.deliveredAt) {
     await MessageModel.updateOne(
       {
         _id: messageObjectId,
-        conversation:
-          conversationObjectId,
+        conversation: conversationObjectId,
         deliveredAt: null,
       },
-      {
-        $set: {
-          deliveredAt: now,
-        },
-      },
+      { $set: { deliveredAt: now } },
     );
-
     updated.deliveredAt = now;
   }
 
   return {
-    messageId:
-      updated._id.toString(),
-
-    conversationId:
-      updated.conversation.toString(),
-
-    deliveredAt:
-      updated.deliveredAt ?? null,
-
-    readAt:
-      updated.readAt ?? null,
+    messageId: updated._id.toString(),
+    conversationId: updated.conversation.toString(),
+    deliveredAt: updated.deliveredAt ?? null,
+    readAt: updated.readAt ?? null,
   };
 }
 
@@ -567,12 +381,7 @@ export function markMessageDelivered(
   conversationId: string,
   userId: string,
 ): Promise<MessageStatusUpdate | null> {
-  return updateMessageStatus(
-    messageId,
-    conversationId,
-    userId,
-    "deliveredAt",
-  );
+  return updateMessageStatus(messageId, conversationId, userId, "deliveredAt");
 }
 
 export function markMessageRead(
@@ -580,10 +389,5 @@ export function markMessageRead(
   conversationId: string,
   userId: string,
 ): Promise<MessageStatusUpdate | null> {
-  return updateMessageStatus(
-    messageId,
-    conversationId,
-    userId,
-    "readAt",
-  );
+  return updateMessageStatus(messageId, conversationId, userId, "readAt");
 }

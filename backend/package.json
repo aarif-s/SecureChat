@@ -11,7 +11,9 @@
     "audit": "npm audit",
     "config:check": "tsx src/config/check-config.ts",
     "redis:test": "tsx src/config/test-redis.ts",
-    "auth:test": "tsx src/utils/test-auth.ts"
+    "auth:test": "tsx src/utils/test-auth.ts",
+    "test": "tsx --test src/services/message-encryption.service.test.ts",
+    "message-encryption:migrate": "tsx src/scripts/migrate-message-encryption.ts"
   },
   "keywords": [],
   "author": "",

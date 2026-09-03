@@ -8,11 +8,13 @@ import {
   disconnectDatabase,
 } from "./config/database.js";
 import { createChatSocketServer } from "./sockets/chat.socket.js";
+import { validateMessageEncryptionConfig } from "./services/message-encryption.service.js";
 
 const PORT = Number(process.env.PORT) || 5000;
 
 async function startServer(): Promise<void> {
   try {
+    validateMessageEncryptionConfig();
     await connectDatabase();
 
     const server = createServer(app);

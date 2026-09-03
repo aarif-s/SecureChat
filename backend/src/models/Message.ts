@@ -1,4 +1,3 @@
-
 import { Schema, model, type Types } from "mongoose";
 
 export type MessageStatus = "sent" | "delivered" | "read";
@@ -10,10 +9,19 @@ export interface MessageReaction {
   userIds: Types.ObjectId[];
 }
 
+export interface MessageEncryption {
+  algorithm: "aes-256-gcm";
+  keyVersion: number;
+  iv: string;
+  authTag: string;
+}
+
 export interface Message {
   conversation: Types.ObjectId;
   sender: Types.ObjectId;
-  content: string;
+  content?: string;
+  encryptedContent?: string;
+  encryption?: MessageEncryption;
   isEdited: boolean;
   deletedAt?: Date | null;
   status: MessageStatus;
@@ -39,10 +47,35 @@ const messageSchema = new Schema<Message>(
     },
     content: {
       type: String,
-      required: true,
+      required: false,
       trim: true,
       minlength: 1,
       maxlength: 5000,
+    },
+    encryptedContent: {
+      type: String,
+      required: false,
+    },
+    encryption: {
+      _id: false,
+      algorithm: {
+        type: String,
+        enum: ["aes-256-gcm"],
+        required: true,
+      },
+      keyVersion: {
+        type: Number,
+        required: true,
+        min: 1,
+      },
+      iv: {
+        type: String,
+        required: true,
+      },
+      authTag: {
+        type: String,
+        required: true,
+      },
     },
     isEdited: {
       type: Boolean,
@@ -93,5 +126,21 @@ const messageSchema = new Schema<Message>(
 );
 
 messageSchema.index({ conversation: 1, createdAt: 1 });
+
+messageSchema.pre("validate", function validateMessageStorage() {
+  const hasPlaintext = typeof this.content === "string";
+  const hasEncryptedContent = typeof this.encryptedContent === "string";
+  const hasEncryptionMetadata = this.encryption !== undefined;
+
+  if (hasPlaintext && !hasEncryptedContent && !hasEncryptionMetadata) {
+    return;
+  }
+
+  if (!hasPlaintext && hasEncryptedContent && hasEncryptionMetadata) {
+    return;
+  }
+
+  throw new Error("Message content storage must be plaintext or encrypted.");
+});
 
 export const MessageModel = model<Message>("Message", messageSchema);
