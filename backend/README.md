@@ -1,8 +1,24 @@
 # SecureChat Backend
 
-Copy `.env.example` to `.env` and provide values for `MONGODB_URI`,
-`UPSTASH_REDIS_REST_URL`, and `UPSTASH_REDIS_REST_TOKEN`. Set `CLIENT_URL` to
-the browser application's origin. `PORT` defaults to `5000` when omitted.
+Copy `.env.example` to `.env` and provide values for the database, Upstash
+Redis, Google OAuth, and email delivery settings. Set `CLIENT_URL` to the
+browser application's origin. `PORT` defaults to `5000` when omitted.
+
+Password signup requires email ownership verification. Configure
+`EMAIL_PROVIDER=resend`, a verified `EMAIL_FROM` address, and a server-only
+`EMAIL_API_KEY`. Verification links use `API_URL` and are never returned by
+the API or logged.
+
+For Google sign-in, create a Google Cloud OAuth consent screen and a Web
+application OAuth client. Add the exact value of
+`GOOGLE_REDIRECT_URI` to the client's authorized redirect URIs. For local
+development this is normally:
+
+`http://localhost:5000/api/auth/google/callback`
+
+Use the corresponding HTTPS API callback URL in production. Keep
+`GOOGLE_CLIENT_SECRET` and `EMAIL_API_KEY` server-side only; they must never be
+placed in frontend environment variables.
 
 Before starting the API, run:
 

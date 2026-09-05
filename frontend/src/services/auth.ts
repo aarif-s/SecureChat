@@ -1,4 +1,8 @@
-import type { AuthResponse, AuthUser } from "../types/auth";
+import type {
+  AuthResponse,
+  AuthUser,
+  RegistrationResponse,
+} from "../types/auth";
 
 const apiBaseUrl = (
   import.meta.env.VITE_API_URL ?? "http://localhost:5000"
@@ -75,11 +79,22 @@ export function register(
   displayName: string,
   email: string,
   password: string,
-): Promise<AuthResponse> {
-  return request<AuthResponse>("/api/auth/register", {
+): Promise<RegistrationResponse> {
+  return request<RegistrationResponse>("/api/auth/register", {
     method: "POST",
     body: JSON.stringify({ displayName, email, password }),
   });
+}
+
+export function resendVerification(email: string): Promise<void> {
+  return request<void>("/api/auth/resend-verification", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function getGoogleLoginUrl(): string {
+  return `${apiBaseUrl}/api/auth/google/start`;
 }
 
 export async function logout(): Promise<void> {

@@ -1,10 +1,14 @@
 import argon2 from "argon2";
-
 import { UserModel } from "../models/User.js";
 import {
   type LoginInput,
   type RegisterInput,
 } from "../schemas/auth.schema.js";
+import { sendVerificationEmail } from "./email.service.js";
+import {
+  createVerificationToken,
+  hashVerificationToken,
+} from "../utils/verification-token.js";
 
 const ARGON2_OPTIONS = {
   type: argon2.argon2id as 2,
@@ -12,6 +16,8 @@ const ARGON2_OPTIONS = {
   timeCost: 2,
   parallelism: 1,
 };
+
+const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class AuthenticationError extends Error {
   constructor() {
@@ -26,31 +32,30 @@ export async function registerUser(
   id: string;
   email: string;
   displayName: string;
+  emailVerified: boolean;
 }> {
-  const existingUser = await UserModel.exists({
-    email: input.email,
-  });
-
-  if (existingUser) {
-    throw new AuthenticationError();
-  }
-
-  const passwordHash = await argon2.hash(
-    input.password,
-    ARGON2_OPTIONS,
-  );
+  const passwordHash = await argon2.hash(input.password, ARGON2_OPTIONS);
+  const verificationToken = createVerificationToken();
 
   try {
     const user = await UserModel.create({
       email: input.email,
       passwordHash: passwordHash.toString(),
       displayName: input.displayName,
+      emailVerified: false,
+      emailVerificationTokenHash: hashVerificationToken(verificationToken),
+      emailVerificationExpiresAt: new Date(
+        Date.now() + EMAIL_VERIFICATION_TTL_MS,
+      ),
     });
+
+    await sendVerificationEmail(user.email, verificationToken);
 
     return {
       id: user.id,
       email: user.email,
       displayName: user.displayName,
+      emailVerified: user.emailVerified,
     };
   } catch (error: unknown) {
     if (
@@ -72,12 +77,13 @@ export async function authenticateUser(
   id: string;
   email: string;
   displayName: string;
+  emailVerified: boolean;
 }> {
-  const user = await UserModel.findOne({
-    email: input.email,
-  }).select("+passwordHash");
+  const user = await UserModel.findOne({ email: input.email }).select(
+    "+passwordHash",
+  );
 
-  if (!user) {
+  if (!user || !user.passwordHash) {
     throw new AuthenticationError();
   }
 
@@ -90,9 +96,77 @@ export async function authenticateUser(
     throw new AuthenticationError();
   }
 
+  if (user.emailVerified === false) {
+    throw new EmailVerificationRequiredError();
+  }
+
   return {
     id: user.id,
     email: user.email,
     displayName: user.displayName,
+    emailVerified: user.emailVerified,
   };
+}
+
+export async function verifyEmailToken(token: string): Promise<boolean> {
+  const tokenHash = hashVerificationToken(token);
+  const user = await UserModel.findOne({
+    emailVerificationTokenHash: tokenHash,
+    emailVerificationExpiresAt: { $gt: new Date() },
+    emailVerified: false,
+  }).select("+emailVerificationTokenHash +emailVerificationExpiresAt");
+
+  if (!user) {
+    return false;
+  }
+
+  const result = await UserModel.updateOne(
+    {
+      _id: user._id,
+      emailVerificationTokenHash: tokenHash,
+      emailVerified: false,
+    },
+    {
+      $set: { emailVerified: true },
+      $unset: {
+        emailVerificationTokenHash: 1,
+        emailVerificationExpiresAt: 1,
+      },
+    },
+  );
+
+  return result.modifiedCount === 1;
+}
+
+export async function resendVerificationEmail(email: string): Promise<void> {
+  const user = await UserModel.findOne({
+    email,
+    emailVerified: false,
+  }).select("+passwordHash");
+
+  if (!user || !user.passwordHash) {
+    return;
+  }
+
+  const verificationToken = createVerificationToken();
+  await UserModel.updateOne(
+    { _id: user._id, emailVerified: false },
+    {
+      $set: {
+        emailVerificationTokenHash: hashVerificationToken(verificationToken),
+        emailVerificationExpiresAt: new Date(
+          Date.now() + EMAIL_VERIFICATION_TTL_MS,
+        ),
+      },
+    },
+  );
+
+  await sendVerificationEmail(user.email, verificationToken);
+}
+
+export class EmailVerificationRequiredError extends Error {
+  constructor() {
+    super("Please verify your email before signing in.");
+    this.name = "EmailVerificationRequiredError";
+  }
 }

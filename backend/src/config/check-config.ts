@@ -5,6 +5,12 @@ const requiredVariables = [
   "MONGODB_URI",
   "UPSTASH_REDIS_REST_URL",
   "UPSTASH_REDIS_REST_TOKEN",
+  "GOOGLE_CLIENT_ID",
+  "GOOGLE_CLIENT_SECRET",
+  "GOOGLE_REDIRECT_URI",
+  "EMAIL_PROVIDER",
+  "EMAIL_FROM",
+  "EMAIL_API_KEY",
 ] as const;
 
 const missingVariables = requiredVariables.filter(

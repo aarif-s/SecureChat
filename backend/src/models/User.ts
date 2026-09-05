@@ -2,8 +2,12 @@ import { Schema, model, type HydratedDocument } from "mongoose";
 
 export interface User {
   email: string;
-  passwordHash: string;
+  passwordHash?: string | null;
   displayName: string;
+  emailVerified: boolean;
+  emailVerificationTokenHash?: string | null;
+  emailVerificationExpiresAt?: Date | null;
+  googleSub?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -23,7 +27,7 @@ const userSchema = new Schema<User>(
 
     passwordHash: {
       type: String,
-      required: true,
+      required: false,
       select: false,
     },
 
@@ -34,14 +38,39 @@ const userSchema = new Schema<User>(
       minlength: 1,
       maxlength: 80,
     },
+
+    emailVerified: {
+      type: Boolean,
+      required: true,
+      default: false,
+    },
+
+    emailVerificationTokenHash: {
+      type: String,
+      required: false,
+      default: null,
+      select: false,
+    },
+
+    emailVerificationExpiresAt: {
+      type: Date,
+      required: false,
+      default: null,
+      select: false,
+    },
+
+    googleSub: {
+      type: String,
+      required: false,
+      unique: true,
+      sparse: true,
+    },
   },
   {
     timestamps: true,
     versionKey: false,
   },
 );
-
-
 
 export const UserModel = model<User>(
   "User",
